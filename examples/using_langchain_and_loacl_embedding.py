@@ -63,6 +63,68 @@ async def langchain_model(
     result = response.content
     return result
 
+
+from langchain_openai import OpenAI, ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from nano_graphrag._utils import compute_args_hash
+from nano_graphrag.base import BaseKVStorage
+
+async def langchain_model_if_cache(
+    prompt, 
+    system_prompt=None, 
+    history_messages=[], 
+    **kwargs
+) -> str:
+    # 初始化 LangChain 的 ChatOpenAI 模型
+    llm = ChatOpenAI(
+        model_name='Meta-Llama-3.1-8B-Instruct',  # 使用的模型名称
+        api_key='your-api-key',  # 替换为实际的 API 密钥
+        max_tokens=4000,
+        temperature=0.0,
+        top_p=1.0,
+        base_url='http://localhost:8000/v1/',  # 替换为实际的模型服务地址
+        max_retries=10,
+    )
+
+    # 创建 PromptTemplate 模板
+    prompt_template = PromptTemplate.from_template(
+        "System Message: {system_message}\nUser: {user_prompt}\n"
+    )
+
+    # 准备系统消息和用户输入
+    system_message = system_prompt if system_prompt else "No system message"
+    user_prompt = prompt  
+
+    # 整理消息历史，包含 system_message 和 user_prompt
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history_messages)
+    messages.append({"role": "user", "content": prompt})
+
+    # 获取缓存
+    hashing_kv: BaseKVStorage = kwargs.pop("hashing_kv", None)
+    if hashing_kv is not None:
+        args_hash = compute_args_hash('Meta-Llama-3.1-8B-Instruct', messages)
+        if_cache_return = await hashing_kv.get_by_id(args_hash)
+        if if_cache_return is not None:
+            return if_cache_return["return"]
+
+    # 调用模型生成响应
+    chain = prompt_template | llm
+    response = chain.invoke({
+        "system_message": system_message,
+        "user_prompt": user_prompt,
+    })
+
+    result = response.content
+
+    # 缓存生成的响应
+    if hashing_kv is not None:
+        await hashing_kv.upsert({args_hash: {"return": result, "model": 'Meta-Llama-3.1-8B-Instruct'}})
+
+    return result
+
 def remove_if_exist(file):
     if os.path.exists(file):
         os.remove(file)
@@ -71,8 +133,8 @@ def query():
     start_time = time.time()  # 记录开始时间
     rag = GraphRAG(
         working_dir=WORKING_DIR,
-        best_model_func=langchain_model,
-        cheap_model_func=langchain_model,
+        best_model_func=langchain_model_if_cache,
+        cheap_model_func=langchain_model_if_cache,
         embedding_func=local_embedding,
     )
     
@@ -103,8 +165,8 @@ def insert():
     rag = GraphRAG(
         working_dir=WORKING_DIR,
         enable_llm_cache=True,
-        best_model_func=langchain_model,
-        cheap_model_func=langchain_model,
+        best_model_func=langchain_model_if_cache,
+        cheap_model_func=langchain_model_if_cache,
         embedding_func=local_embedding,
     )
 
@@ -126,3 +188,4 @@ if __name__ == "__main__":
     query()
     query_time_end = time.time()  # 记录整个查询过程的结束时间
     print(f"Total query execution time: {query_time_end - query_time_start:.2f} seconds")
+
