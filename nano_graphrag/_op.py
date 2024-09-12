@@ -1114,7 +1114,7 @@ async def _map_global_communities(
         # 使用全局提示模板生成系统提示
         sys_prompt_temp = PROMPTS["global_map_rag_points"]
         sys_prompt = sys_prompt_temp.format(context_data=community_context)
-        print("sys_prompt:", sys_prompt)
+
         
         # 调用模型函数处理当前组的社区映射
         response = await use_model_func(
@@ -1175,7 +1175,7 @@ async def _map_global_communities_1(
         # 使用全局提示模板生成系统提示
         sys_prompt_temp = PROMPTS["global_map_rag_points"]
         sys_prompt = sys_prompt_temp.format(context_data=community_context)
-        print("sys_prompt:", sys_prompt)
+
         
         # 调用模型函数处理当前组的社区映射
         response = await use_model_func(
