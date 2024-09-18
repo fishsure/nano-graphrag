@@ -51,6 +51,40 @@ def chunking_by_token_size(
         )
     return results  # 返回分块结果
 
+def chunking_by_token_size_batch(
+    content: str, overlap_token_size=128, max_token_size=1024, tiktoken_model="gpt-4o"
+):
+    # 批量编码整个内容为tokens
+    tokens = encode_string_by_tiktoken(content, model_name=tiktoken_model)
+    
+    # 计算所有的分块起始位置，考虑重叠部分
+    chunks_indices = [
+        (start, start + max_token_size) 
+        for start in range(0, len(tokens), max_token_size - overlap_token_size)
+    ]
+
+    # 批量处理，准备分块
+    results = []
+    all_chunk_tokens = [tokens[start:end] for start, end in chunks_indices]
+    
+    # 批量解码这些tokens
+    all_chunk_content = [
+        decode_tokens_by_tiktoken(chunk, model_name=tiktoken_model).strip()
+        for chunk in all_chunk_tokens
+    ]
+    
+    # 生成最终的结果
+    for index, chunk_content in enumerate(all_chunk_content):
+        results.append(
+            {
+                "tokens": len(all_chunk_tokens[index]),  # 当前块的token数量
+                "content": chunk_content,  # 当前块的内容
+                "chunk_order_index": index,  # 当前块的顺序索引
+            }
+        )
+
+    return results
+
 
 
 # 处理实体或关系的描述，生成简化摘要
@@ -246,6 +280,11 @@ async def _merge_edges_then_upsert(
     )
 
 
+import time
+from collections import defaultdict
+import asyncio
+from typing import Union
+
 # 负责处理实体提取的主要异步任务
 async def extract_entities(
     chunks: dict[str, TextChunkSchema],
@@ -278,12 +317,20 @@ async def extract_entities(
         chunk_key = chunk_key_dp[0]
         chunk_dp = chunk_key_dp[1]
         content = chunk_dp["content"]
+
+        # 计时 - LLM 提取实体
+        start_time = time.time()
         hint_prompt = entity_extract_prompt.format(**context_base, input_text=content)
         final_result = await use_llm_func(hint_prompt)  # 调用LLM模型提取实体
+        end_time = time.time()
+        # print(f"LLM entity extraction time for chunk {chunk_key}: {end_time - start_time:.2f} seconds")
 
         history = pack_user_ass_to_openai_messages(hint_prompt, final_result)  # 将提示与结果打包
         for now_glean_index in range(entity_extract_max_gleaning):  # 最多提取指定次数
+            start_time = time.time()
             glean_result = await use_llm_func(continue_prompt, history_messages=history)
+            end_time = time.time()
+            # print(f"LLM gleaning time {now_glean_index + 1} for chunk {chunk_key}: {end_time - start_time:.2f} seconds")
 
             history += pack_user_ass_to_openai_messages(continue_prompt, glean_result)
             final_result += glean_result
@@ -298,13 +345,18 @@ async def extract_entities(
                 break
 
         # 将提取的结果根据记录和完成分隔符拆分
+        start_time = time.time()
         records = split_string_by_multi_markers(
             final_result,
             [context_base["record_delimiter"], context_base["completion_delimiter"]],
         )
+        end_time = time.time()
+        # print(f"String splitting time for chunk {chunk_key}: {end_time - start_time:.2f} seconds")
 
         maybe_nodes = defaultdict(list)  # 临时存储可能的节点
         maybe_edges = defaultdict(list)  # 临时存储可能的边
+
+        start_time = time.time()
         for record in records:
             record = re.search(r"\((.*)\)", record)  # 使用正则提取括号内的内容
             if record is None:
@@ -327,6 +379,9 @@ async def extract_entities(
                 maybe_edges[(if_relation["src_id"], if_relation["tgt_id"])].append(
                     if_relation
                 )
+        end_time = time.time()
+        # print(f"Entity/Relationship extraction time for chunk {chunk_key}: {end_time - start_time:.2f} seconds")
+
         already_processed += 1
         already_entities += len(maybe_nodes)  # 记录已提取的实体数量
         already_relations += len(maybe_edges)  # 记录已提取的关系数量
@@ -341,9 +396,13 @@ async def extract_entities(
         return dict(maybe_nodes), dict(maybe_edges)
 
     # 异步地处理所有文本块
+    start_time = time.time()
     results = await asyncio.gather(
         *[_process_single_content(c) for c in ordered_chunks]
     )
+    end_time = time.time()
+    print(f"Total time for processing all chunks: {end_time - start_time:.2f} seconds")
+    
     print()  # 清除进度条
     maybe_nodes = defaultdict(list)
     maybe_edges = defaultdict(list)
@@ -355,20 +414,26 @@ async def extract_entities(
             maybe_edges[tuple(sorted(k))].extend(v)
 
     # 合并实体数据并更新到图存储
+    start_time = time.time()
     all_entities_data = await asyncio.gather(
         *[
             _merge_nodes_then_upsert(k, v, knwoledge_graph_inst, global_config)
             for k, v in maybe_nodes.items()
         ]
     )
+    end_time = time.time()
+    print(f"Total time for merging and upserting nodes: {end_time - start_time:.2f} seconds")
 
     # 合并关系数据并更新到图存储
+    start_time = time.time()
     await asyncio.gather(
         *[
             _merge_edges_then_upsert(k[0], k[1], v, knwoledge_graph_inst, global_config)
             for k, v in maybe_edges.items()
         ]
     )
+    end_time = time.time()
+    print(f"Total time for merging and upserting edges: {end_time - start_time:.2f} seconds")
 
     # 如果没有提取到任何实体，记录警告日志
     if not len(all_entities_data):
@@ -377,6 +442,7 @@ async def extract_entities(
 
     # 如果实体向量数据库不为空，将实体数据上载到向量数据库
     if entity_vdb is not None:
+        start_time = time.time()
         data_for_vdb = {
             compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
                 "content": dp["entity_name"] + dp["description"],
@@ -385,6 +451,9 @@ async def extract_entities(
             for dp in all_entities_data
         }
         await entity_vdb.upsert(data_for_vdb)
+        end_time = time.time()
+        print(f"Total time for upserting data to vector DB: {end_time - start_time:.2f} seconds")
+
     return knwoledge_graph_inst  # 返回更新后的图存储实例
 
 
@@ -921,7 +990,9 @@ async def _build_local_query_context(
     query_param: QueryParam,  # 查询参数
 ):
     # 查询实体向量数据库，获取最相关的实体
+    print("Querying entities...")
     results = await entities_vdb.query(query, top_k=query_param.top_k)
+    print(f"Found {len(results)} entities")
     if not len(results):  # 如果没有找到相关实体，返回None
         return None
     
