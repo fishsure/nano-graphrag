@@ -1422,7 +1422,7 @@ async def naive_query(
     maybe_trun_chunks = truncate_list_by_token_size(
         chunks,  # 文本片段列表
         key=lambda x: x["content"],  # 使用文本片段的内容来计算token大小
-        max_token_size=query_param.naive_max_token_for_text_unit,  # 最大允许的token数量
+        max_token_size=query_param.naive_max_token_for_text_unit,  # 最大允许的token数量 
     )
     
     # 记录日志信息，显示截断前后的文本片段数量
